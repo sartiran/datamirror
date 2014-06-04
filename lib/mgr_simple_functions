@@ -1,0 +1,161 @@
+#! /bin/bash
+
+
+. $BASEDIR/lib/base_functions;
+. $BASEDIR/lib/agent_functions;
+. $BASEDIR/lib/feeder_functions;
+
+function loadConf
+{
+    myLog "loading configuration"
+    
+    if [ ! -e $BASEDIR/config/pset.cfg ]
+	then
+	myLog "Missing file $BASEDIR/config/pset.cfg";
+	return 1;
+    fi
+
+    source $BASEDIR/config/pset.cfg;
+}
+
+function agents_watchdog
+{
+
+# first check if all the processes that are supposed to be running are effectively running
+
+    myLog "checking status of running agents"
+
+    for pidfile in $(ls $BASEDIR/state/agents/*/*/*/pids/* 2>/dev/null);
+    do
+      local pid=$(cat $pidfile);
+      local pidstatus=$(ps $pid|grep $pid);
+
+      if [ "x$pidstatus" == "x" ];
+	  then
+	  myLog "agent thread $pid is missing...restarting";
+	  local id=$(echo $pidfile|rev|cut -d '/' -f 1|rev);
+	  local priority=$(echo $pidfile|rev|cut -d '/' -f 3|rev);
+	  local dest=$(echo $pidfile|rev|cut -d '/' -f 4|rev);
+	  local src=$(echo $pidfile|rev|cut -d '/' -f 5|rev);
+
+	  myLog "thread src=$src dest=$dest priority=$priority id=$id pid=$pid is missing, restarting."
+	  launch_agent $priority $src $dest $id $BASEDIR/logs/agents;
+      else
+	   myLog "thread src=$src dest=$dest priority=$priority id=$id pid=$pid is ok."
+      fi
+    done
+
+    myLog "synchronize running tasks with the config"
+    
+    for link in $agents_cfg_links;
+    do
+      local src=$(echo $link|cut -d ':' -f 1);
+      local dest=$(echo $link|cut -d ':' -f 2);
+      local priority=$(echo $link|cut -d ':' -f 3);
+      local num="$(eval "echo \$agents_cfg_${src}_${dest}_${priority}_threads")";
+      local actualnum=$(ls $BASEDIR/state/agents/$src/$dest/$priority/pids/* 2>/dev/null|rev|cut -d '/' -f 1|rev|sort -n|tail -1)
+
+      if [ "x$actualnum" == "x" ]
+	  then
+	  actualnum="0";
+      fi
+
+      myLog "threads for src=$src dest=$dest priority=$priority: current=$actualnum, expected=$num";
+
+      if [ $actualnum -lt $num ]
+	  then
+	  for id in $(seq $[ $actualnum + 1 ] $num);
+	  do
+	    myLog "thread src=$src dest=$dest priority=$priority id=$id not created yet. starting"
+	    launch_agent $priority  $src $dest $id $BASEDIR/logs/agents;
+	  done
+      else
+	  for id in $(seq $[ $num + 1 ] $actualnum)
+	  do
+	    myLog "thread src=$src dest=$dest priority=$priority id=$id should be stopped."
+	    rm $BASEDIR/state/agents/$src/$dest/$priority/pids/$id;
+	  done
+      fi
+
+    done
+}
+
+function setup_agents
+{
+    myLog "setting up directories for agents";
+
+# log directory (should be already there)
+    mkdir -p $BASEDIR/logs/;
+
+# lists directory
+    mkdir -p $BASEDIR/lists/
+    
+    #directories of links
+    for link in $agents_cfg_links;
+    do
+      local src=$(echo $link|cut -d ':' -f 1);
+      local dest=$(echo $link|cut -d ':' -f 2);
+      local priority=$(echo $link|cut -d ':' -f 3);
+
+      mkdir -p $BASEDIR/state/agents/$src/$dest/$priority/pids
+
+#TODO: this will not work if you want to reduce the number of attempts      
+      numattempts=$(eval "echo \$agents_cfg_${src}_${dest}_${priority}_attempts")
+      myLog "configuring link src=$src dest=$dest priority=$priority for $numattempts attempts"
+      for attemp in $(seq 0 $numattempts);
+	do
+	touch $BASEDIR/state/agents/$src/$dest/$priority/queue.$attemp;
+      done
+    done    
+}
+
+function manager_simple
+{
+    sleep 2;
+    PID=$(cat $BASEDIR/state/manager/pid);
+
+    myLog "manager starting"
+
+#loads configuration file
+    loadConf;
+
+    if [ $? != 0 ];
+	then
+	myLog "Cannot load configuration. Exiting";
+	rm $BASEDIR/state/manager/pid;
+	return 1;
+    fi
+
+#this makes sure that all the directories are in place
+    setup_agents;
+
+# this checks the number of agents running
+    agents_watchdog;
+
+# TODO: check the status and send some alarms
+}
+
+function launch_manager_simple
+{
+    mkdir -p $BASEDIR/state/manager;
+    if [ -e $BASEDIR/state/manager/pid ];
+	then
+	myLog "found a manager pid file";
+	local pid=$(cat $BASEDIR/state/manager/pid);
+	local pidstatus=$(ps $pid|grep $pid);
+	if [ "x$pidstatus" == "x" ];
+	    then
+	    myLog "old manager was dead, removing pid file"
+	    rm $BASEDIR/state/manager/pid;
+	else
+	    
+	    myLog "manager is already running..skipping";
+	    return 1;
+	fi
+    fi
+    
+    manager_simple &
+    echo $! > $BASEDIR/state/manager/pid;
+    return 0;
+}
+

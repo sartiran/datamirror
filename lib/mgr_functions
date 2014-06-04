@@ -1,0 +1,323 @@
+#! /bin/bash
+
+
+. $BASEDIR/lib/base_functions;
+. $BASEDIR/lib/agent_functions;
+. $BASEDIR/lib/feeder_functions;
+
+function loadConf
+{
+    myLog "loading configuration"
+    
+    if [ ! -e $BASEDIR/config/pset.cfg ]
+	then
+	myLog "Missing file $BASEDIR/config/pset.cfg";
+	return 1;
+    fi
+
+    source $BASEDIR/config/pset.cfg;
+}
+
+function agents_watchdog
+{
+
+# first check if all the processes that are supposed to be running are effectively running
+
+    myLog "checking status of running agents"
+
+    for pidfile in $(ls $BASEDIR/state/agents/*/*/*/pids/* 2>/dev/null);
+    do
+      local pid=$(cat $pidfile);
+      local pidstatus=$(ps $pid|grep $pid);
+
+      if [ "x$pidstatus" == "x" ];
+	  then
+	  myLog "agent thread $pid from $pidfile is missing...restarting";
+	  local id=$(echo $pidfile|rev|cut -d '/' -f 1|rev);
+	  local priority=$(echo $pidfile|rev|cut -d '/' -f 3|rev);
+	  local dest=$(echo $pidfile|rev|cut -d '/' -f 4|rev);
+	  local src=$(echo $pidfile|rev|cut -d '/' -f 5|rev);
+
+	  myLog "thread src=$src dest=$dest priority=$priority id=$id pid=$pid is missing, restarting."
+	  launch_agent $priority $src $dest $id $BASEDIR/logs/agents;
+      else
+	   myLog "thread src=$src dest=$dest priority=$priority id=$id pid=$pid is ok."
+      fi
+    done
+
+    myLog "synchronize running tasks with the config"
+    
+    for link in $agents_cfg_links;
+    do
+      local src=$(echo $link|cut -d ':' -f 1);
+      local dest=$(echo $link|cut -d ':' -f 2);
+      local priority=$(echo $link|cut -d ':' -f 3);
+      local num="$(eval "echo \$agents_cfg_${src}_${dest}_${priority}_threads")";
+      local actualnum=$(ls $BASEDIR/state/agents/$src/$dest/$priority/pids/* 2>/dev/null|rev|cut -d '/' -f 1|rev|sort -n|tail -1)
+
+      if [ "x$actualnum" == "x" ]
+	  then
+	  actualnum="0";
+      fi
+
+      myLog "threads for src=$src dest=$dest priority=$priority: current=$actualnum, expected=$num";
+
+      if [ $actualnum -lt $num ]
+	  then
+	  for id in $(seq $[ $actualnum + 1 ] $num);
+	  do
+	    myLog "thread src=$src dest=$dest priority=$priority id=$id not created yet. starting"
+	    launch_agent $priority  $src $dest $id $BASEDIR/logs/agents;
+	  done
+      else
+	  for id in $(seq $[ $num + 1 ] $actualnum)
+	  do
+	    myLog "thread src=$src dest=$dest priority=$priority id=$id should be stopped."
+	    rm $BASEDIR/state/agents/$src/$dest/$priority/pids/$id;
+	  done
+      fi
+
+    done
+}
+
+function setup_agents
+{
+    myLog "setting up directories";
+
+# log directory (should be already there)
+    mkdir -p $BASEDIR/logs/;
+
+# lists directory
+    mkdir -p $BASEDIR/lists/
+    
+    #directories of links
+    for link in $agents_cfg_links;
+    do
+      local src=$(echo $link|cut -d ':' -f 1);
+      local dest=$(echo $link|cut -d ':' -f 2);
+      local priority=$(echo $link|cut -d ':' -f 3);
+
+      mkdir -p $BASEDIR/state/agents/$src/$dest/$priority/pids
+
+#TODO: this will not work if you want to reduce the number of attempts      
+      numattempts=$(eval "echo \$agents_cfg_${src}_${dest}_${priority}_attempts")
+      myLog "configuring link src=$src dest=$dest priority=$priority for $numattempts attempts"
+      for attemp in $(seq 0 $numattempts);
+	do
+	touch $BASEDIR/state/agents/$src/$dest/$priority/queue.$attemp;
+      done
+    done    
+}
+
+function manager
+{
+    sleep 2;
+    PID=$(cat $BASEDIR/state/manager/pid);
+
+    myLog "manager starting"
+
+#loads configuration file
+    loadConf;
+
+    if [ $? != 0 ];
+	then
+	myLog "Cannot load configuration. Exiting";
+	rm $BASEDIR/state/manager/pid;
+	return 1;
+    fi
+
+#this makes sure that all the directories are in place
+    setup_agents;
+
+# this checks the number of agents running
+    agents_watchdog;
+
+#getting the list of lfns from the sites
+    getlist;
+
+# checking sites which actually have a new list file	
+    local active_sites="";
+
+    touch $BASEDIR/lists/$site.'old'
+
+    for site in $agents_cfg_sites;
+      do
+      if [ -e $BASEDIR/lists/$site.'new' ];
+	  then
+	  myLog "site $site has a lists..adding"
+	  active_sites=$active_sites" "$site
+      else
+	  myLog "site $site has missing lists..ignoring"
+      fi
+    done
+    
+#site processing lists
+    for site in $active_sites;
+      do
+      site_list_processing $site;
+    done
+    
+    dummy="";
+
+    for site1 in $active_sites;
+      do
+      for site2 in $active_sites;
+	do
+	if [ "x$site1" == "x$site2" ]
+	    then
+	    continue;
+	fi
+	echo $dummy|grep -q ":"$site2'-'$site1":"; 
+	if [ $? == 0 ];
+	    then
+	    continue
+	fi
+	dummy=$dummy":"$site1'-'$site2":";
+	process_link_lists $site1 $site2;
+      done
+    done
+    
+    myLog "all lists have been processed";
+
+#moving the old and new list
+    for site in $active_sites;
+    do
+      mv  $BASEDIR/lists/$site'.new' $BASEDIR/lists/$site'.old';
+    done
+
+    myLog "cleared the site lists";    
+
+    rm $BASEDIR/state/manager/pid;
+}
+
+function launch_manager
+{
+    mkdir -p $BASEDIR/state/manager;
+    if [ -e $BASEDIR/state/manager/pid ];
+	then
+	myLog "found a manager pid file";
+	local pid=$(cat $BASEDIR/state/manager/pid);
+	local pidstatus=$(ps $pid|grep $pid);
+	if [ "x$pidstatus" == "x" ];
+	    then
+	    myLog "old manager was dead, removing pid file"
+	    rm $BASEDIR/state/manager/pid;
+	else
+	    
+	    myLog "manager is already running..skipping";
+	    return 1;
+	fi
+    fi
+    
+    manager &
+    echo $! > $BASEDIR/state/manager/pid;
+    return 0;
+}
+
+
+
+ function getlist
+{
+    myLog "getting lists"
+
+
+    mkdir -p $BASEDIR/lists $BASEDIR/config/lfntfc;
+
+    for site in $agents_cfg_sites;
+      do
+
+      myLog "getting list for site $site"
+    
+      if [ ! -e $BASEDIR/config/lfntfc/$site ];
+	  then
+	  myLog "there is no lfntfc for site $site. Skipping";
+	  continue;
+      fi
+
+      if [ -e $BASEDIR/lists/$site'.new' ]
+	  then
+	  myLog "the current lfn list for site $site has not been processed yet. Skipping."
+	  continue;
+      fi
+
+#get the last timestamp 
+      mkdir -p $BASEDIR/state
+      touch $BASEDIR/state/lfn_list.$site
+
+      local timestamp=$(cat $BASEDIR/state/lfn_list.$site);
+
+      local list=$(eval "echo \$agents_cfg_${site}_list")
+
+
+#get the list from the site
+      local actuallist=$(ls $list'.'[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null);
+
+      if [ "x$actuallist" == "x" ]
+	  then
+	  myLog "there is no list for site $site. skipping"
+	  continue
+      fi
+
+      local actualtimestamp=$(echo $actuallist|rev|cut -d '.' -f 1|rev);
+
+      if [ "x$actualtimestamp" == "x$timestamp" ];
+	  then
+	  myLog "there is no new list for site $site, skipping."
+	  continue;
+      fi
+      
+      create_lfn_list $actuallist $site;
+
+      echo $actualtimestamp > $BASEDIR/state/lfn_list.$site;
+    done
+
+}
+
+
+
+
+function create_lfn_list
+{
+    local list=$1;
+    local site=$2;
+
+    while read line;
+    do
+      local matched=$(matchLine $site $line);
+      if [ "x$matched" == "x" ]
+	  then 
+	  myLog "unmatched line: $line";
+      else
+	  echo $matched >> $BASEDIR/lists/$site'.new.tmp';
+      fi
+    done < $list;
+
+    mv $BASEDIR/lists/$site'.new.tmp' $BASEDIR/lists/$site'.new'
+
+    return 0;
+}
+
+function matchLine
+{
+    local site=$1; shift;
+    local row=$@;
+
+    grep "^PFNTOLFN" $BASEDIR/config/lfntfc/$site|while read line;
+    do
+      local regexp=$(echo $line|awk '{print $2}');
+      local subs=$(echo $line|awk '{print $3}');
+#      echo $regexp $subs $row;
+      echo $row|grep -qP "$regexp"
+      if [ $? == 0 ]
+          then
+          local command_string="perl -e '"'$dummy="'$row'";$dummy=~s/'$regexp"/"$subs'/;print $dummy;'"'";
+          ret=$(eval $command_string 2>/dev/null);
+          echo $ret;
+          return 0;
+      fi
+    done
+
+#    echo NOMATCH;
+#    return 1;
+}
+

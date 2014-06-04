@@ -1,0 +1,56 @@
+#! /bin/bash
+
+. $BASEDIR/lib/base_functions;
+. $BASEDIR/lib/storsym_functions;
+
+#this are functions for simulating prod
+#lfns are in the form /store/tfcflag/dataset/datablock/guid.extension
+
+function gen_guid
+{
+    mkdir -p  $BASEDIR/sym;
+
+    if [ ! -e  $BASEDIR/sym/guid ]
+	then
+	echo 0 > $BASEDIR/sym/guid;
+    fi
+
+    lockFile $BASEDIR/sym/guid;
+
+    local ret=$[ $(cat $BASEDIR/sym/guid) + 1];
+
+    echo $ret > $BASEDIR/sym/guid
+
+    releaseFile $BASEDIR/sym/guid;
+
+    echo $ret;
+}
+
+
+
+function storage_inject
+{
+    local site=$1;
+
+    local files=$[ $RANDOM % 10 ];
+
+    myLog "injecting $files files in site $site";
+
+    mkdir -p $BASEDIR/storages
+    touch $BASEDIR/storages/$site;
+
+    for count in $(seq 1 $files);
+    do
+#setup the file details
+      local dataset=$[ $RANDOM % 20 ];
+      local block=$[ $RANDOM % 100];
+      local file=$(gen_guid);
+      local tfcflag=$[ $RANDOM % 2 ];
+      local size=$RANDOM;
+
+      faked_write $site "/tech/$site/rootdir/store/$tfcflag/$dataset/$block/$file" $size y;
+      myLog "Injected /tech/$site/rootdir/store/$tfcflag/$dataset/$block/$file with size $size in site $site";
+
+    done
+}
+

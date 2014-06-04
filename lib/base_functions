@@ -1,0 +1,159 @@
+#! /bin/bash
+
+#Base functions. 
+
+function myLog
+{
+    echo $(date +'%Y-%m-%d %H:%M:%S')':['$PID']: '$1;
+}
+
+function lockFile
+{
+    local file=$1;
+
+    sleep 0.$RANDOM
+
+    while [[ $? == 0 ]];
+      do sleep 0.$RANDOM;
+      lockfile -r 1 -l 3600 -0 -! $file'.lock' 1>/dev/null 2>/dev/null;
+    done
+    
+    return 0;
+}
+
+
+function releaseFile
+{
+    local file=$1;
+    rm -f $file'.lock';
+    return 0;
+}
+
+
+function fifo_pop
+{
+    local file=$1;
+
+    lockFile $file;
+    
+    local lines=$(wc -l $file|awk '{print $1}');
+
+    if [ "x$lines" == "x0" ];
+	then
+	echo "fifo_pop_empty_file";
+    else
+	head -1 $file;
+	mv $file $file'.fifo_pop_tmp';
+	tail -$[ $lines - 1 ] $file'.fifo_pop_tmp' > $file;
+	rm $file'.fifo_pop_tmp';
+    fi
+	
+    releaseFile $file;
+}
+
+
+function fifo_merge
+{
+    local file_1=$1;
+    local file_2=$2;
+
+    lockFile $file_1;
+    lockFile $file_2;
+
+    grep -fF $file_1 $file_2 > $file_2'.fifo_merge_tmp';
+
+    cat $file_1  $file_2'.fifo_merge_tmp' >  $file_1'.fifo_merge_tmp'
+    
+    mv $file_1'.fifo_merge_tmp' $file_1;
+
+    rm $file_1'.fifo_merge_tmp'  $file_2'.fifo_merge_tmp';
+
+    releaseFile $file_1;
+    releaseFile $file_2;
+}
+
+function fifo_push_line
+{
+    local file=$1; shift;
+    local line=$@;
+
+    lockFile $file;
+
+    echo $line >> $file;
+
+    releaseFile $file;
+}
+
+
+
+function fifo_empty
+{
+    local file=$1;
+
+    lockFile $file;
+
+    cat $file;
+    rm -f $file;
+    touch $file;
+
+    releaseFile $file;
+}
+
+
+function fifo_append
+{
+    local file=$1;
+    local line=$2;
+
+    lockFile $file;
+
+    cat $line >> $file;
+
+    releaseFile $file;
+}
+
+function fifo_remove_entries
+{
+    local fifo=$1;
+    local file=$2;
+
+    lockFile $fifo;
+
+    grep -vFf $file $fifo >> $fifo'.fifo_remove_entries.tmp'
+
+    mv $fifo'.fifo_remove_entries.tmp' $fifo;
+
+    releaseFile $fifo;
+    
+}
+
+function fifo_append_file
+{
+    local fifo=$1;
+    local file=$2;
+
+    lockFile $fifo;
+
+    cat $file >> $fifo;
+
+    releaseFile $fifo;
+}
+
+function test_fifo
+{
+    local fifo=$1;
+    local out=$2;
+    local dummy="start";
+    
+    
+    myLog "starting thread"
+    while [ "x$dummy" != "xfifo_pop_empty_file" ]
+    do
+      fifo_push_line $out $dummy;
+      echo $dummy;
+      dummy=$(fifo_pop $fifo);
+    done
+    sleep 30;
+    myLog "finished thread"
+}
+

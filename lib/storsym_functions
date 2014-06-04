@@ -1,0 +1,188 @@
+#! /bin/bash
+
+. $BASEDIR/lib/base_functions;
+
+#the surl are like srm://$site/$pfn
+#pfn are like /tech/$site/rootdir/$lfn;
+#the storage entry is pfn=$pfn:size=$size:corrupted=$flag;
+
+#writes on the faked storage
+function faked_write
+{
+    local site=$1;
+    local pfn=$2;
+    local size=$3;
+    local timeless=$4;
+
+    local preparetime=$[ $RANDOM % 5 ];
+    local transfertime=$[ $RANDOM % 60 ];
+
+
+#if it is invoked in timeless mode the faking does not include time sym
+    if [ "x$timeless" == "xy" ]
+	then
+	preparetime=0;
+	transfertime=0;
+    fi
+
+#sleep to simulate preparetime
+    sleep $preparetime;
+
+#check if the destination file is there. If so fails
+    local testdest=$(grep "pfn=$pfn:" $BASEDIR/storages/$site 2>/dev/null);
+
+    if [ "x$testdest" != "x" ]
+	then
+	myLog "written pfn=$pfn failed: file already at the site $site" >> $BASEDIR/logs/storsym.$site;
+	echo "EXISTS";
+	return 1;
+    fi
+
+#sleep for the time of transfer
+    sleep $transfertime
+
+    local seed=$RANDOM;
+
+#failed transfer
+    if [ $seed -lt 100 ];
+	then
+	myLog "failed write of pfn=$pfn size=$size to site $site" >> $BASEDIR/logs/storsym.$site;
+	echo "FAILED";
+	return 2;
+    fi
+
+#good transfer with corrupted file
+    if [ $seed -lt 150 ];
+	then
+	local corrupted=1;
+    else
+	local corrupted=0;
+    fi
+
+#good transfer with wrong size
+    if [ $seed -lt 200 ];
+	then
+        size=$RANDOM;
+    fi
+
+
+#actual writing
+    lockFile $BASEDIR/storages/$site;
+
+    echo "pfn=$pfn:size=$size:corrupted=$corrupted" >> $BASEDIR/storages/$site;
+
+    releaseFile $BASEDIR/storages/$site;
+
+    myLog "written pfn=$pfn size=$size corrupted=$corrupted to site $site in $[ $preparetime + $transfertime] seconds" >> $BASEDIR/logs/storsym.$site;
+    echo "OK";
+}
+
+#syms deletion on a faked storage
+function faked_del
+{
+    local site=$1;
+    local pfn=$2;
+
+    lockFile $BASEDIR/storages/$site;
+    
+    cp $BASEDIR/storages/$site $BASEDIR/storages/$site'.tmp'
+
+    grep -v '^pfn=$pfn:' $BASEDIR/storages/$site'.tmp' > $BASEDIR/storages/$site
+
+    rm $BASEDIR/storages/$site'.tmp'
+
+    releaseFile $BASEDIR/storages/$site
+
+    myLog "deleted pfn=$pfn from site $site" >> $BASEDIR/logs/storsym.$site;
+
+}
+
+function faked_lcg_ls
+{
+    local surl=$1;
+
+    local site=$(echo $surl|cut -d '/' -f 3);
+    local pfn=$(echo $surl|cut -d '/' -f 4-|awk '{print "/"$1}');
+
+    local size=$(grep "^pfn=$pfn:" $BASEDIR/storages/$site |cut -d ':' -f 2|cut -d '=' -f 2);
+
+    if [ "x$size" = "x" ]
+	then
+	echo "No such a file or directory"
+	return 1
+    fi
+
+    echo "-rw-rw-rw- a b c  $size  $surl";
+    echo "Checksum FAKED";
+
+    myLog "srmLs for $pfn at $site" >> $BASEDIR/logs/storsym.$site;
+}
+
+
+function faked_lcg_cp
+{
+    local src=$1;
+    local dest=$2;
+
+    local srcsite=$(echo $src|cut -d '/' -f 3);
+    local srcpfn=$(echo $src|cut -d '/' -f 4-|awk '{print "/"$1}')
+
+    local destsite=$(echo $dest|cut -d '/' -f 3);
+    local destpfn=$(echo $dest|cut -d '/' -f 4-|awk '{print "/"$1}')
+
+    sleep $[ $RANDOM % 10 ];
+
+#check if the source file exists
+    local size=$(grep "^pfn=$srcpfn:" $BASEDIR/storages/$srcsite 2>/dev/null|cut -d ':' -f 2|cut -d '=' -f 2);
+    if [ "x$size" == "x" ]
+	then	
+	myLog "faked lcg-cp $src $dest: missing source file" >> $BASEDIR/logs/storsym.UI;
+	echo "No source file";
+	return 1;
+    fi
+
+#check if the source file is corrupted
+    local corrupted=$(grep "^pfn=$srcpfn:" $BASEDIR/storages/$srcsite|cut -d ':' -f 3|cut -d '=' -f 2);
+    if [ "x$corrupted" == "x1" ]
+	then	
+	myLog "faked lcg-cp $src $srcdest: corrupted source file" >> $BASEDIR/logs/storsym.UI;
+	echo "Corrupted source file";
+	return 1;
+    fi
+    
+#write the file to destination
+    local status=$(faked_write $destsite $destpfn $size n);
+
+    if [ "x$status" == "xEXISTS" ];
+	then
+	myLog "faked lcg-cp $src $srcdest: destination file exists" >> $BASEDIR/logs/storsym.UI;
+	echo "Destination file exists";
+	return 1;
+    fi
+
+    if [ "x$status" == "xFAILED" ];
+	then
+	myLog "faked lcg-cp $src $srcdest: failed" >> $BASEDIR/logs/storsym.UI;
+	echo "Failed transfer";
+	return 1;
+    fi
+    
+    myLog "faked lcg-cp $src $srcdest: done" >> $BASEDIR/logs/storsym.UI;
+    echo "transfer";
+
+}
+
+
+function faked_ls
+{
+    local site=$1;
+    local pfn=$2;
+    
+    grep -P "^pfn=$pfn\S*:size=\d+:corrupted=\S\s*$" $BASEDIR/storages/$site|tr ':' ' '|tr '=' ' '|awk '{print "-rw-rw-rw "$4" "$2}';
+
+    myLog "faked ls for site $site and pfn $pfn" >> $BASEDIR/logs/storsym.$site;
+
+}
+
+
+

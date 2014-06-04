@@ -1,0 +1,3 @@
+#! /bin/bash
+
+ echo $[ $(grep  'successfully transferred' logs/agents|cut -d '=' -f 12|awk '{s+=$1}END{print s}')/($(date -d "$(grep 'successfully transferred' logs/agents |tail -1 |cut -d ':' -f -3)" +%s) - $(date -d "$(grep -m1 'successfully transferred' logs/agents |cut -d ':' -f -3)" +%s))]

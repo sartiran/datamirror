@@ -1,0 +1,226 @@
+#! /bin/bash
+
+export AGENTSLEEP=600;
+
+. $BASEDIR/lib/base_functions;
+
+function fetch_transfer
+{
+    local priority=$1;
+    local src=$2;
+    local dest=$3;
+    local ret="";
+
+    for queue in $(ls $BASEDIR/state/agents/$src/$dest/$priority/queue.*|grep -P 'queue.\d+\s*$'|sort)
+    do
+      local dummy=$(fifo_pop $queue);
+      if [ "x$dummy" != "xfifo_pop_empty_file" ];
+	  then
+	  ret=$dummy":"$(echo $queue|rev|cut -d '.' -f 1|rev);
+	  break;
+      fi
+    done
+    
+    echo $ret;
+}
+
+function get_pfn
+{
+    local src=$1;
+    local dest=$2
+    local lfn=$3;
+    local flag=$4;
+    local ret="";
+    
+    
+
+
+    grep "^$flag" $BASEDIR/config/tfc/$src'.'$dest|while read line;
+    do
+      local regexp=$(echo $line|awk '{print $2}');
+      local subs=$(echo $line|awk '{print $3}');
+      echo $lfn|grep -qP "$regexp" 
+      if [ $? == 0 ]
+	  then
+	  local command_string="perl -e '"'$dummy="'$lfn'";$dummy=~s/'$regexp"/"$subs'/;print $dummy;'"'";
+	  ret=$(eval $command_string 2>/dev/null);
+	  echo $ret;
+	  break;
+      fi
+    done
+}
+
+function getSize
+{
+    local surl=$1
+    local proto=$(echo $surl|cut -d ':' -f 1);
+    if [ "x$proto" == "xfile" ];
+	then
+	echo $(ls -l $(echo $surl|cut -d ':' -f 2-) 2>&1 |grep '^-'|awk '{print $5}');
+    else
+	echo $(lcg-ls -l $surl 2>&1 |grep '^-'|awk '{print $5}');
+    fi
+}
+
+
+
+function transfer
+{
+    local srcpfn=$1;
+    local destpfn=$2;
+
+    #check if the src file is there
+    local srcsize=$(getSize $srcpfn);
+    
+    if [ "x$srcsize" == "x" ];
+	then
+	echo "failed:No src file found";
+	return 1
+    fi
+
+    #check if the destination file is already there
+
+    local destsize=$(getSize $destpfn);
+    
+    if [ "x$destsize" != "x" ];
+	then
+	if [ "x$destsize" == "x$srcsize" ];
+	    then
+	    echo "done:file prevalidated with size $srcsize";
+	    return 0
+	else
+	    echo "failed: destination file size $destsize does not match with source file size $srcsize";
+	    return 1
+	fi
+    fi
+
+    #if we are here the file is to be transferred
+    lcg-cp  -n 10 $srcpfn $destpfn 1>/dev/null 2>&1;
+    sleep 5;
+
+    #validate the transfer
+    destsize=$(getSize $destpfn);
+    
+    if [ "x$destsize" != "x$srcsize" ];
+	then
+	echo "failed:file failed validation srcsize is $srcsize ad destsize is $destsize";
+	return 1
+    fi
+
+    #if we are here everything was just fine :)
+    echo "done:file successfully transferred size=$srcsize";
+    return 0;
+}
+
+
+function agent
+{
+    local priority=$1;
+    local src=$2;
+    local dest=$3;
+    local id=$4
+
+    sleep 2;
+
+    local PID=$(cat $BASEDIR/state/agents/$src/$dest/$priority/pids/$id);
+
+    myLog "Starting agent thread src=$src dest=$dest priority=$priority id=$id";
+
+#Makes sure that the tfc is there
+    if [ ! -e $BASEDIR/config/tfc/$src'.'$dest ];
+	then
+	myLog "Missing tfc, killing agent thread src=$src dest=$dest priority=$priority id=$id";
+	rm $BASEDIR/state/agents/$src/$dest/$priority/pids/$id;
+	return 1
+    fi
+
+#loops while the state pid dir file exists
+    while [ -e $BASEDIR/state/agents/$src/$dest/$priority/pids/$id ]
+      do
+
+      #Gets the next transfer to deal with
+      myLog "Agent fetches next transfer to perform"
+      local fetch_transfer=$(fetch_transfer $priority $src $dest);
+
+      #There are no files to transfers
+      if [ "x$fetch_transfer" == "x" ]
+      then
+	  myLog "no transfers to perform..sleeping"
+	  sleep $AGENTSLEEP;
+	  continue;
+      fi
+      
+      local lfn=$(echo $fetch_transfer|cut -d ':' -f 1);
+      local attempt=$(echo $fetch_transfer|cut -d ':' -f 2);
+      
+
+      myLog "Agent fetched transfer for lfn: $lfn attempt: $attempt";
+
+
+#getting the PFN    
+      local srcpfn=$(get_pfn $src $dest $lfn SRCREGEXP);
+      local destpfn=$(get_pfn $src $dest $lfn DESTREGEXP);
+      
+
+#if some of pfn is not there, logs error and continues 
+      if [ "x$srcpfn" == "x" ]
+      then
+	  myLog "Cannot map source pfn for $lfn, discarting transfer";
+	  fifo_push_line $BASEDIR/state/agents/$src/$dest/$priority/problematic $lfn;
+	  continue;
+      fi
+
+
+      if [ "x$srcpfn" == "x" ]
+      then
+	  myLog "Cannot map destination pfn for $lfn, discarting transfer";
+	  fifo_push_line $BASEDIR/state/agents/$src/$dest/$priority/problematic $lfn;
+	  continue;
+      fi
+
+#executes the transfer
+      tx_exit=$(transfer $srcpfn $destpfn);
+      
+#check the exit status
+      tx_exit_status=$(echo $tx_exit|cut -d ':' -f 1 );
+
+#if the transfer is failed move it to the next attemp queue or to expired
+      if [ "x$tx_exit_status" == "xfailed" ];
+	  then
+#	  mylog $BASEDIR/state/agents/$src/$dest/$priority/queue.$[ $attempt + 1 ];
+	  if [ -e $BASEDIR/state/agents/$src/$dest/$priority/queue.$[ $attempt + 1 ] ]
+	      then
+	      fifo_push_line $BASEDIR/state/agents/$src/$dest/$priority/queue.$[ $attempt + 1 ] $lfn
+	  else
+	      fifo_push_line $BASEDIR/state/agents/$src/$dest/$priority/expired $lfn
+	  fi
+	  
+      else	  
+#else move it to the transfered file 
+	  fifo_push_line  $BASEDIR/state/agents/$src/$dest/$priority/transfered $lfn;
+      fi
+
+#final log for the transfer
+      myLog "exit: lfn=$lfn srcpfn=$srcpfn destpfn=$destpfn priority=$priority attempt=$attempt src=$src dest=$dest tx_exit=$tx_exit";
+      
+      
+    done
+   
+#if we are here the agent has to stop
+    myLog "agent gracefully stops";
+
+}
+
+function launch_agent
+{
+    local priority=$1;
+    local src=$2;
+    local dest=$3;
+    local id=$4;
+    local logfile=$5;
+
+    mkdir -p $BASEDIR/state/agents/$src/$dest/$priority/pids/;
+
+    agent $priority $src $dest $id >> $logfile 2>&1 &
+    echo $! > $BASEDIR/state/agents/$src/$dest/$priority/pids/$id;
+}

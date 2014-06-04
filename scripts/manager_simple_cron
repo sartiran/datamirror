@@ -1,0 +1,24 @@
+#! /bin/bash
+
+#just few variables to be defined
+#export X509_USER_PROXY=$BASEDIR/config/proxy.cert;
+export PID=$$;
+export LOGFILE=$BASEDIR/logs/manager;
+
+. $BASEDIR/lib/base_functions;
+. $BASEDIR/lib/feeder_functions;
+. $BASEDIR/lib/mgr_simple_functions;
+
+mkdir -p $BASEDIR/logs;
+
+
+
+myLog "manager_cron running" 1>>$LOGFILE 2>&1;
+
+export LOGFILE=$BASEDIR/logs/manager;
+
+launch_manager_simple 1>>$LOGFILE 2>&1;
+
+myLog "manager_cron finished" 1>>$LOGFILE 2>&1;
+
+exit 0;

@@ -1,0 +1,160 @@
+#! /bin/bash
+
+#list format is lfn=LFN:size=SIZE:checksum=CKSUM:
+
+#Default value for BASEDIR
+
+. $BASEDIR/lib/base_functions;
+
+function site_list_processing
+{
+    local site=$1;
+        
+    myLog "starting site list processing for $site"
+
+#base lists of lfns
+    local listold=$BASEDIR/lists/$site'.old'
+    local listnew=$BASEDIR/lists/$site'.new'
+
+#this function expects all the lists to be there.   
+    for list in $listold $listnew
+    do
+      if [ ! -e $list ];
+	  then
+	  myLog "error: missing old list"
+	  return 1
+      fi
+    done
+    
+#create list of lfns
+    cut -d ':' -f 1 $listold|cut -d '=' -f 2 > $listold'.lfn';
+    cut -d ':' -f 1 $listnew|cut -d '=' -f 2  > $listnew'.lfn';
+    
+#create the list of deleted files
+    grep -vFf $listnew'.lfn' $listold'.lfn' > $BASEDIR/lists/$site'.deleted';
+
+    myLog "there are "$(wc -l $BASEDIR/lists/$site'.deleted'|awk '{print $1}')" deleted files at site $site";
+
+#create a first list of purged files
+    cat $BASEDIR/lists/*'.deleted' > $BASEDIR/lists/$site'.2purge' 2>/dev/null
+    cat $BASEDIR/state/agents/*/*/*/queue.[0-9] >>  $BASEDIR/lists/$site'.2purge' 2>/dev/null
+    cat $BASEDIR/state/agents/*/*/*/expired >>  $BASEDIR/lists/$site'.2purge' 2>/dev/null
+    cat $BASEDIR/state/agents/*/*/*/problematic >>  $BASEDIR/lists/$site'.2purge' 2>/dev/null
+    cat $BASEDIR/state/agents/*/*/*/transfered >>  $BASEDIR/lists/$site'.2purge' 2>/dev/null
+
+   myLog "there are in total "$(wc -l $BASEDIR/lists/$site'.2purge'|awk '{print $1}')" files to purge at site $site";
+   myLog "there are in total "$(wc -l $listnew'.lfn'|awk '{print $1}')" files at site $site";
+
+#create the list of purged file
+   grep -vFf $BASEDIR/lists/$site'.2purge' $listnew'.lfn' > $BASEDIR/lists/$site'.effective' 
+
+   myLog "there are in total "$(wc -l $BASEDIR/lists/$site'.effective'|awk '{print $1}')" files at site $site";
+
+#cleanup lists
+    rm -f    $BASEDIR/lists/$site'.2purge' ;
+
+#    for list in $(ls $BASEDIR/state/agents/*/$site/*/transfered 2>/dev/null);
+#    do
+#      myLog "cleaning file $list";
+#      fifo_empty $list 1>/dev/null;
+#    done
+
+#this is done.
+
+    rm -f $BASEDIR/lists/$site'.2purge' $listnew'.lfn';
+
+    return 0;
+}
+
+
+function process_link_lists
+{
+    local site1=$1;
+    local site2=$2;
+		
+
+    myLog "starting the list processing for $site1 $site2"
+
+#base list of lfns
+    local list1=$BASEDIR/lists/$site1'.effective'
+    local list2=$BASEDIR/lists/$site2'.effective'
+
+    for list in $list1 $list2
+    do
+      if [ ! -e $list ];
+	  then
+	  myLog "missing list: $list. exiting."
+	  return 1;
+      fi
+    done
+
+    myLog "all lists found starting to process them"
+
+#list of files missing at site1 and site2
+    grep -vFf $list1 $list2 > $BASEDIR/lists/$site2'.2btransferred';
+    grep -vFf $list2 $list1 > $BASEDIR/lists/$site1'.2btransferred';
+
+    myLog "there are "$(wc -l  $BASEDIR/lists/$site1'.2btransferred'|awk '{print $1}')" files to transfer from $site1 to $site2";
+    myLog "there are "$(wc -l  $BASEDIR/lists/$site2'.2btransferred'|awk '{print $1}')" files to transfer from $site2 to $site1";
+
+#add to the queue
+    fifo_append_file $BASEDIR/state/agents/$site1/$site2/normal/queue.0 $BASEDIR/lists/$site1'.2btransferred';
+    fifo_append_file $BASEDIR/state/agents/$site2/$site1/normal/queue.0 $BASEDIR/lists/$site2'.2btransferred';    
+    
+    rm -f $BASEDIR/lists/$site2'.2btransferred' $BASEDIR/lists/$site1'.2btransferred' $BASEDIR/lists/$site2'.effective' $BASEDIR/lists/$site1'.effective' 
+   for list in $(ls $BASEDIR/state/agents/*/*/*/transfered 2>/dev/null);
+    do
+      myLog "cleaning file $list";
+      fifo_empty $list 1>/dev/null;
+    done
+
+
+    return 0;
+}
+
+function inject_list
+{
+    local source=$1;
+    local dest=$2;
+    local priority=$3;
+    local file=$4;
+
+    if [ ! -e $file ]
+	then
+	myLog "list of files $file does not exists";
+	return 1;
+    fi
+
+    if [ ! -e $BASEDIR/state/agents/$source/$dest/$priority/queue.0 ]
+	then
+	myLog "there is no queue for source=$source destination=$dest priority=$priority";
+	return 1;
+    fi
+
+    for queue in $(ls $BASEDIR/state/agents/$source/$dest/$priority/queue.*);
+    do 
+      fifo_remove_entries $queue $file;
+    done
+
+
+    touch $BASEDIR/state/agents/$source/$dest/$priority/transfered;
+
+    fifo_remove_entries $BASEDIR/state/agents/$source/$dest/$priority/transfered $file;
+
+    touch $BASEDIR/state/agents/$source/$dest/$priority/expired;
+
+    fifo_remove_entries $BASEDIR/state/agents/$source/$dest/$priority/expired $file;
+    
+    touch $BASEDIR/state/agents/$source/$dest/$priority/problematic;
+
+    fifo_remove_entries $BASEDIR/state/agents/$source/$dest/$priority/problematic $file;
+    
+    fifo_append_file $BASEDIR/state/agents/$source/$dest/$priority/queue.0 $file;
+
+    local num=$(wc -l $file|awk '{print $2}');
+
+    myLog "injected $num files from $source to $dest with priority $priority using file list $file";
+
+    return 0;
+}
+

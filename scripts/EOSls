@@ -1,0 +1,1 @@
+uberftp eoscmsftp.cern.ch "dir $1"

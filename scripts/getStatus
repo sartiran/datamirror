@@ -1,0 +1,72 @@
+#! /bin/bash
+
+
+
+SOURCE="";
+DEST="";
+PRIO="";
+LIST="";
+FUNCTION="";
+
+##H Get the status of  a given transfer task
+##H
+##H ./getStatus (-summary|-transfered|-transfering|-expired|-problematic) -dest DESTINATION -src SOURCE -prio PRIORITY -list FILELIST [-h]
+##H
+##H
+##H OPTIONS AND ARGUMENTS:
+##H 
+##H TASK DEFINITION:
+##H
+##H -dest DEST   : destination site.
+##H
+##H -src SOURCE  : source site.
+##H
+##H -prio PRIO   : priority.
+##H
+##H -list FILE   : file with the list of lfn's.
+##H
+##H OUTPUT:
+##H
+##H -summary     : prints a summary of the files in all status.
+##H
+##H -transfered  : prints a list of the transfered files.
+##H
+##H -expired     : prints a list of the expired files (i.e. all allowed transfers attempts have failed).
+##H
+##H -problematic : prints a list of the problematic files.
+##H
+##H 
+
+while [ $# -ge 1 ]; do
+  case $1 in
+    -summary ) FUNCTION="summary"; shift ;;
+    -transfered ) FUNCTION="transfered"; shift ;;
+    -transfering ) FUNCTION="transfering"; shift ;;
+    -expired ) FUNCTION="expired"; shift ;;
+    -problematic ) FUNCTION="problematic"; shift ;;
+    -dest ) DEST=$2; shift ; shift ;;
+    -src ) SOURCE=$2; shift ; shift ;;
+    -list ) LIST=$2; shift ; shift ;;
+    -prio ) PRIO=$2; shift ; shift ;;
+    -h ) grep '##H' $0|grep -v grep|cut -d 'H' -f 2-;exit 0;;
+    -* ) echo "unrecognised option $1. Use -h for help" 1>&2; exit 5 ;;
+    *  ) break ;;
+  esac
+done
+
+
+
+#check the transferred files
+function summary
+{
+    local state_dir=$BASEDIR/state/agents/$SOURCE/$DEST/$PRIO
+    local attempts=$(ls $state_dir/queue.*|grep -c '/queue.');
+    echo "TOTAL FILES: "$(wc -l $LIST|awk '{print $1}' );
+    echo "TRANSFERED FILES: $(grep -cFf $state_dir/transfered $LIST)";
+    touch $state_dir/expired $state_dir/problematic
+    echo "EXPIRED FILES: $(grep -cFf $state_dir/expired $LIST)";
+    echo "PROBLEMATIC FILE: $(grep -cFf $state_dir/problematic $LIST)";
+}
+
+
+$FUNCTION;

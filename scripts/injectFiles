@@ -1,0 +1,23 @@
+#! /bin/bash
+
+export SOURCE="";
+export DEST="";
+export PRIO="";
+export LIST="";
+
+. $BASEDIR/lib/feeder_functions;
+
+while [ $# -ge 1 ]; do
+  case $1 in
+    -src ) SOURCE=$2; shift ; shift ;;
+    -dest ) DEST=$2; shift ; shift ;;
+    -prio ) PRIO=$2; shift ; shift ;;
+    -list ) LIST=$2; shift ; shift ;;
+    -h ) grep '##H' $0|grep -v grep|cut -d 'H' -f 2-;exit 0;;
+    -* ) echo "unrecognised option $1. Use -h for help" 1>&2; exit 5 ;;
+    *  ) break ;;
+  esac
+done
+
+inject_list $SOURCE $DEST $PRIO $LIST;
+
